@@ -1,0 +1,4 @@
+xcuserdata
+*.xcworkspace/
+/Example/Pods/
+/Example/MockServer/session_??????
