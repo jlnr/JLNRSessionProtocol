@@ -3,13 +3,13 @@
 //  JLNRSessionProtocolTest
 //
 //  Created by Julian Raschke on 11.06.14.
-//
+//  Copyright © 2014 Raschke & Ludwig GbR. All rights reserved.
 //
 
 #import "JLNRSessionProtocol.h"
 
 
-#ifdef JLNR_SESSION_PROTOCOL_TEST
+#ifdef DEBUG
 #define JLNRLog(...) NSLog(__VA_ARGS__)
 #else
 #define JLNRLog(...)
@@ -19,18 +19,19 @@
 static NSPointerArray *sessions;
 
 
-typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
-    JLNRSessionRequestStateBeforeRequest = 0,
-    JLNRSessionRequestStateFirstChance,
-    JLNRSessionRequestStateAfterResponse,
-    JLNRSessionRequestStateSecondChance,
-    JLNRSessionRequestStateFinished,
+// Not prefixed, since it is only used internally.
+typedef NS_ENUM(NSInteger, RequestState) {
+    RequestStateBeforeRequest = 0,
+    RequestStateFirstChance,
+    RequestStateAfterResponse,
+    RequestStateSecondChance,
+    RequestStateFinished,
 };
 
 
 @interface JLNRSessionProtocol () <NSURLConnectionDataDelegate>
 
-@property (nonatomic) JLNRSessionRequestState state;
+@property (nonatomic) RequestState state;
 @property (nonatomic) NSURLConnection *connection;
 @property (nonatomic) id<JLNRSession> session;
 
@@ -55,12 +56,11 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
 + (void)registerSession:(id<JLNRSession>)session
 {
     @synchronized(sessions) {
-        NSUInteger lastSessionCount = [sessions count];
-        
-        [sessions addPointer:(__bridge void *)(session)];
-        
-        if (lastSessionCount == 0 && [sessions count] > 0) {
+        [sessions compact];
+        [sessions addPointer:(__bridge void *)session];
+        if ([sessions count] == 1) {
             [NSURLProtocol registerClass:self.class];
+            JLNRLog(@"Registered JLNRSessionProtocol");
         }
     }
 }
@@ -68,30 +68,32 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
 + (void)invalidateSession:(id<JLNRSession>)session
 {
     @synchronized(sessions) {
-        NSUInteger lastSessionCount = [sessions count];
-
-        for (NSInteger i = 0; i < lastSessionCount; ++i) {
+        [sessions compact];
+        NSUInteger previousSessionCount = sessions.count;
+        for (NSInteger i = 0; i < previousSessionCount; ++i) {
             if ([sessions pointerAtIndex:i] == (__bridge void *)session) {
                 [sessions replacePointerAtIndex:i withPointer:NULL];
+                break;
             }
         }
         [sessions compact];
-        
-        if (lastSessionCount > 0 && [sessions count] == 0) {
+        if (previousSessionCount > 0 && sessions.count == 0) {
             [NSURLProtocol unregisterClass:self.class];
+            JLNRLog(@"Unregistered JLNRSessionProtocol");
         }
     }
 }
 
-+ (id<JLNRSession>)firstSessionInterestedInRequest:(NSURLRequest *)request
++ (nullable id<JLNRSession>)firstSessionInterestedInRequest:(NSURLRequest *)request
 {
-    NSArray *currentSessions = nil;
+    NSArray *currentSessions;
     @synchronized(sessions) {
+        [sessions compact];
         currentSessions = [sessions allObjects];
     }
     
     for (id<JLNRSession> session in currentSessions) {
-        if ([session sessionShouldHandleRequest:request]) {
+        if ([session shouldHandleRequest:request]) {
             return session;
         }
     }
@@ -103,15 +105,10 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
 
 + (BOOL)canInitWithRequest:(NSURLRequest *)request
 {
-    BOOL isInternalRequest =
-        [NSURLProtocol propertyForKey:NSStringFromClass(self.class)
-                            inRequest:request] != nil;
-    
-    if (isInternalRequest) {
-        return NO;
-    }
-    
-    return [self firstSessionInterestedInRequest:request] != nil;
+    id internalRequestMarker = [NSURLProtocol propertyForKey:NSStringFromClass(self.class)
+                                                   inRequest:request];
+    // Do not pass internally created requests on to our registered sessions.
+    return internalRequestMarker == nil && [self firstSessionInterestedInRequest:request] != nil;
 }
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request
@@ -138,7 +135,7 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
 
 - (void)stopLoading
 {
-    if (self.state != JLNRSessionRequestStateFinished) {
+    if (self.state != RequestStateFinished) {
         JLNRLog(@"Stopping request in state %@: %@", @(self.state), self.request);
     }
 
@@ -152,49 +149,57 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
 {
     NSMutableURLRequest *nextRequest = nil;
     
-    if (self.state == JLNRSessionRequestStateBeforeRequest) {
-        nextRequest = [[self.session sessionRequestBeforeRequest:self.request] mutableCopy];
+    JLNRLog(@"Advancing one step for request %@, state = %@", self.request.URL, @(self.state));
+    
+    if (self.state == RequestStateBeforeRequest) {
+        nextRequest = [[self.session loginRequestBeforeRequest:self.request] mutableCopy];
         
         if (nextRequest == nil) {
-            self.state = JLNRSessionRequestStateFirstChance;
-        }
-        else {
-            JLNRLog(@"Opening session before request: %@", self.request);
+            self.state = RequestStateFirstChance;
+            JLNRLog(@"No need to log in before request: %@", self.request.URL);
+        } else {
+            JLNRLog(@"Logging in before request: %@", self.request.URL);
         }
     }
     
-    if (self.state == JLNRSessionRequestStateFirstChance ||
-        self.state == JLNRSessionRequestStateSecondChance) {
+    if (self.state == RequestStateFirstChance ||
+        self.state == RequestStateSecondChance) {
         
+        JLNRLog(@"Will try to send request %@", self.request.URL);
         nextRequest = [self.request mutableCopy];
-        
-        [self.session applySessionToRequest:nextRequest];
+        [self.session applySecretToRequest:nextRequest];
     }
     
-    if (self.state == JLNRSessionRequestStateAfterResponse) {
-        
+    if (self.state == RequestStateAfterResponse) {
         nextRequest =
-            [[self.session sessionRequestAfterResponse:self.currentResponse
-                                                  data:self.currentData] mutableCopy];
+            [[self.session loginRequestAfterResponse:(NSHTTPURLResponse *)self.currentResponse
+                                                data:self.currentData] mutableCopy];
         
         if (nextRequest == nil) {
-            self.state = JLNRSessionRequestStateFinished;
+            self.state = RequestStateFinished;
+            JLNRLog(@"No need to log in after request: %@", self.request.URL);
+        } else {
+            JLNRLog(@"Logging in after request: %@", self.request.URL);
         }
     }
     
-    if (self.state == JLNRSessionRequestStateFinished) {
+    if (self.state == RequestStateFinished) {
+        JLNRLog(@"Finished - passing response to outer request");
         [self finish];
-    }
-    else {
+    } else {
+        // If we get here, we need to send a login request.
+        NSAssert(nextRequest, @"we must have a request to send at this point");
+        
+        JLNRLog(@"Opening connection for %@", nextRequest.URL);
+        
+        // Mark this request as internal to JLNRSessionProtocol so we can ignore it later.
         [NSURLProtocol setProperty:@YES
                             forKey:NSStringFromClass(self.class)
                          inRequest:nextRequest];
         
         self.currentResponse = nil;
         self.currentData = nil;
-        self.connection = [NSURLConnection connectionWithRequest:nextRequest
-                                                        delegate:self];
-        
+        self.connection = [NSURLConnection connectionWithRequest:nextRequest delegate:self];
         [self.connection start];
     }
 }
@@ -215,14 +220,14 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
 
 - (void)connection:(NSURLConnection *)connection didReceiveResponse:(NSURLResponse *)response
 {
-    JLNRLog(@"connection: %@ didReceiveResponse: %@", connection, response);
+    NSParameterAssert([response isKindOfClass:[NSHTTPURLResponse class]]);
+    JLNRLog(@"connection: %@ didReceiveResponse: statusCode=%@",
+            connection, @(((NSHTTPURLResponse *)response).statusCode));
     
     self.currentResponse = response;
     self.currentData = [NSMutableData data];
     
-    if (self.state == JLNRSessionRequestStateFirstChance ||
-        self.state == JLNRSessionRequestStateSecondChance) {
-        
+    if (self.state == RequestStateFirstChance || self.state == RequestStateSecondChance) {
         self.originalResponse = response;
     }
 }
@@ -236,16 +241,11 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
 {
     JLNRLog(@"connectionDidFinishLoading: %@", connection);
     
-    if (self.state == JLNRSessionRequestStateFirstChance ||
-        self.state == JLNRSessionRequestStateSecondChance) {
-        
+    if (self.state == RequestStateFirstChance || self.state == RequestStateSecondChance) {
         self.originalData = self.currentData;
-    }
-    else if (self.state == JLNRSessionRequestStateBeforeRequest ||
-             self.state == JLNRSessionRequestStateAfterResponse) {
-        
-        if (! [self.session storeSessionFromResponse:self.currentResponse
-                                                data:self.currentData]) {
+    } else if (self.state == RequestStateBeforeRequest || self.state == RequestStateAfterResponse) {
+        if (! [self.session storeSecretFromResponse:(NSHTTPURLResponse *)self.currentResponse
+                                               data:self.currentData]) {
             
             NSError *error = [NSError errorWithDomain:NSStringFromClass(self.class)
                                                  code:0
@@ -264,8 +264,7 @@ typedef NS_ENUM(NSInteger, JLNRSessionRequestState) {
     [self sendNextRequestOrFinish];
 }
 
-- (void)connection:(NSURLConnection *)connection
-  didFailWithError:(NSError *)error
+- (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error
 {
     JLNRLog(@"connection:didFailWithError: %@", connection);
 

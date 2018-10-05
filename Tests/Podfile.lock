@@ -1,0 +1,25 @@
+PODS:
+  - GCDWebServer (3.4.2):
+    - GCDWebServer/Core (= 3.4.2)
+  - GCDWebServer/Core (3.4.2)
+  - JLNRSessionProtocol (0.0.1)
+
+DEPENDENCIES:
+  - GCDWebServer (~> 3.0)
+  - JLNRSessionProtocol (from `..`)
+
+SPEC REPOS:
+  https://github.com/cocoapods/specs.git:
+    - GCDWebServer
+
+EXTERNAL SOURCES:
+  JLNRSessionProtocol:
+    :path: ".."
+
+SPEC CHECKSUMS:
+  GCDWebServer: 8d67ee9f634b4bb91eb4b8aee440318a5fc6debd
+  JLNRSessionProtocol: 6dd82d86fe7908b77d01916be3a1dce196d247eb
+
+PODFILE CHECKSUM: c2b5ff504f7646a0ebe9a3d2271ac5b953dac732
+
+COCOAPODS: 1.5.3

@@ -1,0 +1,6 @@
+platform :osx, "10.8"
+
+target "JLNRSessionProtocolTests" do
+  pod "GCDWebServer", "~> 3.0", inhibit_warnings: true
+  pod "JLNRSessionProtocol", path: ".."
+end
